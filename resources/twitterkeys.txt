@@ -1,0 +1,4 @@
+{ :APP_KEY "your app key"
+  :APP_SECRET "your app secret"
+  :USER_TOKEN "your user token"
+  :USER_SECRET "your user secret"}
