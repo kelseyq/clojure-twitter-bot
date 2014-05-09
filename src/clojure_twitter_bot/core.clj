@@ -1,20 +1,19 @@
 (ns clojure-twitter-bot.core
-  (:gen-class)
   (:use
    [twitter.oauth]
    [twitter.callbacks]
    [twitter.callbacks.handlers]
    [twitter.api.restful]
    [twitter.api.streaming])
-  (:require
+    (:require
    [clojure.data.json :as json]
    [http.async.client :as ac]
    [clojure.edn :as edn]
    [clojure.java.io :as io])
   (:import
    (twitter.callbacks.protocols SyncSingleCallback)
-   (twitter.callbacks.protocols SyncStreamingCallback)))
-
+   (twitter.callbacks.protocols SyncStreamingCallback))
+  (:gen-class))
 
 (defn getEnvVar
   [varName]
@@ -69,6 +68,7 @@
   (when (and (not (empty? tweetMap)) (.contains (:tweet tweetMap) "can i kick it"))
         (replyToTweet tweetMap)))
 
+
 (defn -main
   []
   (let [expected (atom 0)
@@ -82,11 +82,14 @@
         (swap! tweet #(str % newText)) ;update current message
       ))
 
+      (do
+        (println "starting stream")
         (user-stream :params {:delimited "length", :with "user"}
          :oauth-creds my-creds
          :callbacks (SyncStreamingCallback. (fn [_resp payload]
                                                  (let [bodyString (.toString payload)]
                                                    (do
+                                                     (println bodyString)
                                                      (if (== @expected 0)
                                                        (let [splitBody (clojure.string/split bodyString #"\n" 2)]
                                                          (do
@@ -108,5 +111,6 @@
                                                          )
                                                     ))))
                                               (fn [_resp] (println _resp))
-                                              (fn [_resp ex] (println _resp))))))
+                                              (fn [_resp ex] (println _resp))))
+        (println "stream terminated"))))
 

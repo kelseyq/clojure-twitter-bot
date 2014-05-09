@@ -6,4 +6,6 @@
                  [twitter-api "0.7.5"]
                  [twitter-streaming-client "0.3.1"]]
   :resource-paths ["resources"]
-  :main clojure-twitter-bot.core)
+  :jvm-opts ["-XX:+UseG1GC" "-server" "-Xmx512m"]
+  :main clojure-twitter-bot.core
+  :aot [clojure-twitter-bot.core])
