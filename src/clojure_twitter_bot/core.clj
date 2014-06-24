@@ -5,11 +5,12 @@
    [twitter.callbacks.handlers]
    [twitter.api.restful]
    [twitter.api.streaming])
-    (:require
+  (:require
    [clojure.data.json :as json]
    [http.async.client :as ac]
    [clojure.edn :as edn]
-   [clojure.java.io :as io])
+   [clojure.java.io :as io]
+   [twitter-streaming-client.core :as client])
   (:import
    (twitter.callbacks.protocols SyncSingleCallback)
    (twitter.callbacks.protocols SyncStreamingCallback))
@@ -42,75 +43,43 @@
 
 (defn replyToTweet
   [tweetMap]
-  (statuses-update :oauth-creds my-creds
+    (statuses-update :oauth-creds my-creds
                    :params {:status (str "@" (:screen-name tweetMap) " yes you can"),
                             :in_reply_to_status_id (:tweet_id tweetMap)}
                             :callbacks (SyncSingleCallback. response-return-body
                                                             response-throw-error
                                                             exception-rethrow)))
 
-(defn readJson
-  [theString]
-  (try (if-not (clojure.string/blank? theString)
-   (json/read-str theString :key-fn keyword)
-   {})
-  (catch Exception e (do
-    (println (str "caught exception: " (.getMessage e) " for input: " theString))
-                      {}))))
-
-(defn intOrZero
-  [theString]
-  (try (Integer/parseInt (clojure.string/trim theString))
-       (catch Exception e 0)))
+(defn now [] (java.util.Date.))
 
 (defn filterTweet
   [tweetMap]
-  (when (and (not (empty? tweetMap)) (.contains (:tweet tweetMap) "can i kick it"))
-        (replyToTweet tweetMap)))
+    (when (and (not (empty? tweetMap)) (.contains (:tweet tweetMap) "can i kick it"))
+      (println (str (:screen-name tweetMap) " can kick it at " (now)))
+      (replyToTweet tweetMap)))
 
+(def stream (client/create-twitter-stream twitter.api.streaming/user-stream
+                                          :oauth-creds my-creds :params {:with "user"}))
+
+(defn do-every
+  [ms callback]
+  (loop []
+    (do
+      (Thread/sleep ms)
+      (try (callback)
+           (catch Exception e (println (str "caught exception: " (.getMessage e))))))
+    (recur)))
+
+(defn check-if-can-kick-it
+  []
+  (let
+    [tweets (:tweet (client/retrieve-queues stream))]
+    (dorun (->>
+       (map extractTweetInfo tweets)
+       (map filterTweet)))))
 
 (defn -main
   []
-  (let [expected (atom 0)
-        cnt (atom 0)
-        tweet (atom "")]
-
-    (defn updateWithChunk
-      [newText]
-      (do
-        (swap! cnt #(+ (count (byte-array (map byte newText))) %)) ;update count of bytes
-        (swap! tweet #(str % newText)) ;update current message
-      ))
-
-      (do
-        (println "starting stream")
-        (user-stream :params {:delimited "length", :with "user"}
-         :oauth-creds my-creds
-         :callbacks (SyncStreamingCallback. (fn [_resp payload]
-                                                 (let [bodyString (.toString payload)]
-                                                   (do
-                                                     (println bodyString)
-                                                     (if (== @expected 0)
-                                                       (let [splitBody (clojure.string/split bodyString #"\n" 2)]
-                                                         (do
-                                                          (reset! expected (intOrZero (get splitBody 0)));update the expected # of bytes
-                                                          (updateWithChunk (get splitBody (dec (count splitBody))))
-                                                          ))
-                                                       (do
-                                                          (updateWithChunk bodyString)
-                                                        ))
-                                                      (if (>= @cnt @expected)
-                                                        (do
-                                                          (-> @tweet
-                                                              readJson
-                                                              extractTweetInfo
-                                                              filterTweet)
-                                                          (reset! expected 0)
-                                                          (reset! cnt 0)
-                                                          (reset! tweet "")
-                                                         )
-                                                    ))))
-                                              (fn [_resp] (println _resp))
-                                              (fn [_resp ex] (println _resp))))
-        (println "stream terminated"))))
-
+  (do
+    (client/start-twitter-stream stream)
+    (do-every 5000 check-if-can-kick-it)))
