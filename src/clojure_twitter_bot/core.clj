@@ -29,37 +29,63 @@
                                 (getEnvVar :USER_TOKEN)
                                 (getEnvVar :USER_SECRET)))
 
+(comment "TODO: these with map")
+(def reply-or-manual-rt?
+  (some-fn #(.startsWith % "@")
+           #(.startsWith % "\"@")
+           #(.startsWith % "“@")
+           #(.startsWith % "RT")
+           #(.startsWith % "MT")))
 
-(defn extractTweetInfo
+(def bad-words?
+  (some-fn #(.contains % "gay")
+           #(.contains % "fag")
+           #(.contains % "nig")
+           #(.contains % "cunt")))
+
+(defn candidate?
   [tweetMap]
-    (try (if-not (empty? tweetMap)
-   {:tweet (clojure.string/lower-case (:text tweetMap)), :tweet_id (:id_str tweetMap),
-    :user (get-in tweetMap [:user :id_str]), :screen-name (get-in tweetMap [:user :screen_name])}
-   {})
-  (catch Exception e (do
-    (println (str "non-tweet received: " tweetMap))
-                      {}))))
+  (not (or (empty? tweetMap)
+           (contains? tweetMap :retweeted_status)
+           (reply-or-manual-rt? (:text tweetMap))
+           (bad-words? (:text tweetMap)))))
 
-
-(defn replyToTweet
+(defn extract-tweet-info
   [tweetMap]
-    (statuses-update :oauth-creds my-creds
-                   :params {:status (str "@" (:screen-name tweetMap) " yes you can"),
-                            :in_reply_to_status_id (:tweet_id tweetMap)}
-                            :callbacks (SyncSingleCallback. response-return-body
-                                                            response-throw-error
-                                                            exception-rethrow)))
+    {:tweet (:text tweetMap),
+     :tweet_link (str "http://twitter.com/" (get-in tweetMap [:user :screen_name]) "/status/" (:id_str tweetMap)),
+     :screen-name (get-in tweetMap [:user :screen_name])})
 
 (defn now [] (java.util.Date.))
 
-(defn filterTweet
-  [tweetMap]
-    (when (and (not (empty? tweetMap)) (.contains (:tweet tweetMap) "can i kick it"))
-      (println (str (:screen-name tweetMap) " can kick it at " (now)))
-      (replyToTweet tweetMap)))
+(defn mike-jones
+  [who]
+  (do (println (str now ": MIKE JONES-ING " who))
+      (statuses-update :oauth-creds my-creds
+                       :params {:status (str "\"" (:who who) "\"\n MIKE JONES\n\n" (:url who))},
+                       :callbacks (SyncSingleCallback. response-return-body
+                                                       response-throw-error
+                                                       exception-rethrow)))
+)
 
-(def stream (client/create-twitter-stream twitter.api.streaming/user-stream
-                                          :oauth-creds my-creds :params {:with "user"}))
+(def whos ["who" "whoo" "whooo" "whoooo" "whooooo" "whooooo" "whoooooo" "whooooooo"])
+(def manualRTs ["@" "\"@" "“@" "RT" "MT"])
+
+(defn ends-with-who?
+  [tweetMap]
+  (and (seq tweetMap)
+       (try (if-let [who-value (or
+                    (re-find #"(?is).*(?:[^a-zA-Z0-9']| then| and| but| or| of| lol| lmao)+\s+who+[\\?|!|\n]+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap)))
+                    (re-find #"(?is)^who+[\\?|!|\n]+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap))))]
+                  {:who (clojure.string/trim who-value), :url (:tweet_link tweetMap)}
+                 nil
+                )
+            (catch Exception e (do
+                                 (println (str "regex issue: " tweetMap))
+                                 nil)))))
+
+(def stream (client/create-twitter-stream twitter.api.streaming/statuses-filter
+                                          :oauth-creds my-creds :params {:track (clojure.string/join "," whos)}))
 
 (defn do-every
   [ms callback]
@@ -70,16 +96,24 @@
            (catch Exception e (println (str "caught exception: " (.getMessage e))))))
     (recur)))
 
-(defn check-if-can-kick-it
+(defn check-for-who
   []
   (let
     [tweets (:tweet (client/retrieve-queues stream))]
-    (dorun (->>
-       (map extractTweetInfo tweets)
-       (map filterTweet)))))
+    (if-let [candidates (->> tweets
+       (filter candidate?)
+       (map extract-tweet-info)
+       (map ends-with-who?)
+       (filter identity)
+       (filter #(< (count (:who %)) 102)))]
+      (mike-jones (rand-nth candidates))
+      (println "no candidates found")
+      )))
 
 (defn -main
   []
   (do
+    (println "STARTING MIKE JONES BOT")
     (client/start-twitter-stream stream)
-    (do-every 5000 check-if-can-kick-it)))
+    (check-for-who)
+    (do-every 1800000 check-for-who)))
