@@ -30,8 +30,21 @@
                                 (getEnvVar :USER_TOKEN)
                                 (getEnvVar :USER_SECRET)))
 
-(comment "TODO: these with map")
-;"(defn reply-or-manual-rt? [s] (reduce #(if (.startsWith %1 %2) (reduced false) s) s ["@" "\"@" "“@" "RT" "MT"]))"
+(comment
+  (defn reply-or-manual-rt?
+    [s]
+    (reduce #(if-not (.startsWith %1 %2) (reduced false) s) s ["@" "\"@" "“@" "RT" "MT"]))
+  )
+
+(defn disallowed-words?
+    [input]
+      (let [lowercase (clojure.string/lower-case input)]
+        ((some-fn #(.contains % "gay")
+                  #(.contains % "fag")
+                  #(.contains % "nig")
+                  #(.contains % "cunt")
+                  #(.contains % "rape")) lowercase)))
+
 (def reply-or-manual-rt?
   (some-fn #(.startsWith % "@")
            #(.startsWith % "\"@")
@@ -39,21 +52,16 @@
            #(.contains % "RT ")
            #(.contains % "MT ")))
 
-(def bad-words?
-  (some-fn #(.contains % "gay")
-           #(.contains % "fag")
-           #(.contains % "nig")
-           #(.contains % "cunt")
-           #(.contains % "ask.fm/")))
 
 (defn candidate?
   [tweetMap]
-  (not (or (empty? tweetMap)
-           (contains? tweetMap :retweeted_status)
-           (= (get-in tweetMap [:user :screen_name]) "NowImBot")
-           (.contains (:text tweetMap) "NowImBot")
-           (reply-or-manual-rt? (:text tweetMap))
-           (bad-words? (:text tweetMap)))))
+      (not (or (empty? tweetMap)
+               (contains? tweetMap :retweeted_status)
+               (= (get-in tweetMap [:user :screen_name]) "NowImBot")
+               (.contains (:text tweetMap) "NowImBot")
+               (some #(.contains % "ask.fm") (map :expanded_url (get-in tweetMap [:entities :urls])))
+               (reply-or-manual-rt? (:text tweetMap))
+               (disallowed-words? (:text tweetMap)))))
 
 (defn extract-tweet-info
   [tweetMap]
@@ -64,21 +72,18 @@
 
 (defn now [] (java.util.Date.))
 
-(def whos ["who" "whoo" "whooo" "whoooo" "whooooo" "whooooo" "whoooooo" "whooooooo"])
-(def manualRTs ["@" "\"@" "“@" "RT" "MT"])
+(def whos ["who" "whoo" "whooo" "whoooo" "whooooo" "whooooo" "whoooooo" "whooooooo" "whoooooooo" "whooooooooo?" "whoooooooooo"])
+
+(comment (re-find #"(?is)^who+\?+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap))))
 
 (defn ends-with-who?
   [tweetMap]
-  (and (seq tweetMap)
-       (try (if-let [who-value (or
-                    (re-find #"(?is).*(?:[^a-zA-Z0-9']| then| and| but| or| of| lol| lmao | with)+\s+who+[\\?|\n]+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap)))
-                    (re-find #"(?is)^who+[\\?|\n]+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap))))]
-                  {:who (clojure.string/trim who-value), :url (:tweet_link tweetMap)}
-                 nil
-                )
-            (catch Exception e (do
-                                 (log/error e (str "regex issue: " tweetMap))
-                                 nil)))))
+      (try (if-let [who-value (re-find #"(?is).*(?:[^a-zA-Z0-9'é]| then| and| but| or| of| lol| lmao| like)+\s+who+!*\?+[^a-zA-Z0-9\s]*" (clojure.string/trim (:tweet tweetMap)))]
+             {:who (clojure.string/trim who-value), :url (:tweet_link tweetMap)}
+             nil)
+           (catch Exception e (do
+                                (log/error e (str "regex issue: " tweetMap))
+                                nil))))
 
 (def who-stream (client/create-twitter-stream twitter.api.streaming/statuses-filter
                                           :oauth-creds my-creds :params {:track (clojure.string/join "," whos)}))
@@ -93,61 +98,63 @@
     (recur)))
 
 (def interval 30)
-(def empty-state {:candidates [] :deletes [] :minutes-since-update 0})
+(def empty-state {:candidates [] :minutes-since-update 0})
 
 (defn mike-jones
-  [state]
+  [state previous]
 
   (defn reset-state
-    [response]
+    [who response]
     (if (== (quot (:code (ac/status response)) 100) 2)
-      (reset! state empty-state)
+      (do (reset! state empty-state)
+          (swap! previous conj who))
       (log/error "error posting tweet, response code " (:code (ac/status response)) ": " (ac/string response))))
 
-  (comment "TODO: handle deletes")
   (if-let [candidates (seq (:candidates @state))]
     (let [who (rand-nth candidates)
           tweet (str (:who who) "\nMIKE JONES\n\n" (:url who))]
       (log/debug (str "MIKE JONES-ING " who))
-      (log/debug (str "full tweet: " tweet))
-      (log/debug (str "deletes: " (seq (:deletes @state))))
       (statuses-update :oauth-creds my-creds
                        :params {:status tweet},
-                       :callbacks (SyncSingleCallback. reset-state
+                       :callbacks (SyncSingleCallback. (partial reset-state who)
                                                        response-throw-error
                                                        exception-rethrow)))
     (log/debug (str "no candidates found after " (:minutes-since-update @state) " minutes"))))
 
+(defn log-size
+  [coll]
+  (log/debug (str "filtering " (count coll) " tweets"))
+   coll)
+
 (defn check-for-who
-  [state]
-  (let
-    [ stream (client/retrieve-queues who-stream)
-      tweets (:tweet stream)
-      deletes (:delete stream)]
-        (do
-          (swap! state update-in [:deletes] concat (seq deletes))
-          (if-let [candidates (seq (->> tweets
+  [state previous]
+          (if-let [candidates (seq (->> (:tweet (client/retrieve-queues who-stream))
+                                        (log-size)
                                         (filter candidate?)
                                         (map extract-tweet-info)
                                         (map ends-with-who?)
                                         (filter identity)
+                                        (filter #(not (@previous (:who %))))
+                                        (filter #(not (.contains (:who %) "@")))
+                                        (filter #(not (.contains (:who %) "http")))
                                         (filter #(< (count (:who %)) 104))))]
             (do
               (log/debug (str "adding " (count candidates) " candidates to list:\n" (clojure.string/join "\n" (map :who candidates))))
               (swap! state update-in [:candidates] concat candidates))
             (log/debug "no candidates found on regular interval check"))
           (if (>= (:minutes-since-update @state) interval)
-            (mike-jones state)))))
+            (mike-jones state previous)))
 
 (defn -main
   []
-  (let [state (atom (assoc empty-state :minutes-since-update interval))]
+  (let [state (atom (assoc empty-state :minutes-since-update interval))
+        previous (atom #{})]
 
     (defn run-bot
       []
       (do
         (swap! state #(update-in % [:minutes-since-update] inc))
-        (check-for-who state)
+        (check-for-who state previous)
         ))
 
     (do
