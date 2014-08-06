@@ -155,14 +155,36 @@
           (if (>= (:minutes-since-update @state) mike-jones-interval)
             (mike-jones state previous)))
 
-(comment            (= (:in_reply_to_user_id_str tweetMap) "2678831582"))
+(defn reply-to-number
+  [number-tweet]
+  (log/debug (str "replying to number from " (:screen-name number-tweet)))
+  (try
+      (statuses-update :oauth-creds my-creds
+                       :params {:status (str "@" (:screen-name number-tweet) " hit Mike Jones up on the low cause Mike Jones about to blow")
+                                :in_reply_to_status_id (:id_str number-tweet)
+                                :lat 29.804295
+                                :long -95.388141},
+                       :callbacks (SyncSingleCallback. response-return-body
+                                                       response-throw-error
+                                                       exception-rethrow))
+      (catch Exception e (log/error e (str "error replying to number from " (:screen-name number-tweet))))))
+
+(defn reply-to-numbers
+  []
+  (when-let [number (seq (->> (:tweet (client/retrieve-queues number-stream))
+                                (filter candidate?)
+                                (map extract-tweet-info)
+                                (filter #(not (.contains (clojure.string/lower-case (:tweet %)) "mike")))
+                                (filter #(not (.contains (clojure.string/lower-case (:tweet %)) "jones")))
+                                ))]
+    (doseq [n number] (reply-to-number n))))
 
 (defn is-legit-mention?
   [tweetMap]
-       (not (or (empty? tweetMap)
-                (= (get-in tweetMap [:user :screen_name]) "NowImBot")
-                (and (= (get-in tweetMap [:retweeted_status :user :screen_name]) "NowImBot")
-                     (.startsWith (get-in tweetMap [:retweeted_status :text]) "@")))))
+  (not (or (empty? tweetMap)
+           (= (get-in tweetMap [:user :screen_name]) "NowImBot")
+           (and (= (get-in tweetMap [:retweeted_status :user :screen_name]) "NowImBot")
+                (.startsWith (get-in tweetMap [:retweeted_status :text]) "@")))))
 
 (def replies
   ["back then % didn't want me, now I'm hot % all on me"
@@ -171,12 +193,14 @@
 
 (defn get-mention-reply
   [tweetMap]
-  (if (= (get-in tweetMap [:retweeted_status :user :screen_name]) "NowImBot")
-    (clojure.string/replace (rand-nth replies) #"%" name)
-    (let [text (clojure.string/lower-case (clojure.string/replace (:text tweetMap) #"([\"|“].*[\"|”])" ""))]
-       (cond (.contains text "mike") "WHO?"
-             (.contains text "who") "MIKE JONES"
-             :else (clojure.string/replace (rand-nth replies) #"%" name)))))
+  (let [name (get-in tweetMap [:user :screen_name])]
+    (if (= (get-in tweetMap [:retweeted_status :user :screen_name]) "NowImBot")
+      (clojure.string/replace (rand-nth replies) #"%" name)
+      (let [text (clojure.string/lower-case (clojure.string/replace (:text tweetMap) #"([\"|“].*[\"|”])" ""))]
+        (cond (.contains text "mike") "WHO?"
+              (.contains text "who") "MIKE JONES"
+              :else (clojure.string/replace (rand-nth replies) #"%" name))))))
+
 
 (defn reply-to-mention
   [mention]
@@ -196,35 +220,11 @@
       (catch Exception e (log/error e (str "error replying to mention from " (get-in mention [:user :screen_name])))))))
 
 (defn reply-to-mentions
-  []
-  (when-let [mentions (seq (->> (:tweet (client/retrieve-queues mentions-stream))
-                                 (filter is-legit-mention?)))]
+  [user-mentions]
+  (when-let [mentions (seq (->> user-mentions
+                                (filter is-legit-mention?)))]
     (doseq [m mentions] (reply-to-mention m))))
 
-(defn reply-to-number
-  [number-tweet]
-  (log/debug (str "replying to number from " (:screen-name number-tweet)))
-  (try
-      (statuses-update :oauth-creds my-creds
-                       :params {:status (str "@" (:screen-name number-tweet) " hit Mike Jones up on the low cause Mike Jones about to blow")
-                                :in_reply_to_status_id (:id_str number-tweet)
-                                :lat 29.804295
-                                :long -95.388141},
-                       :callbacks (SyncSingleCallback. response-return-body
-                                                       response-throw-error
-                                                       exception-rethrow))
-      (catch Exception e (log/error e (str "error replying to number from " (:screen-name number-tweet))))))
-
-
-(defn reply-to-numbers
-  []
-  (when-let [number (seq (->> (:tweet (client/retrieve-queues number-stream))
-                                (filter candidate?)
-                                (map extract-tweet-info)
-                                (filter #(not (.contains (clojure.string/lower-case (:tweet %)) "mike")))
-                                (filter #(not (.contains (clojure.string/lower-case (:tweet %)) "jones")))
-                                ))]
-    (doseq [n number] (reply-to-number n))))
 
 (defn reply-to-follow
   [follow]
@@ -244,10 +244,19 @@
 
 
 (defn reply-to-follows
-  []
-  (when-let [follows (seq (->> (:unknown (client/retrieve-queues mentions-stream))
+  [user-events]
+  (when-let [follows (seq (->> user-events
                                (filter #(= (:event %) "follow"))))]
     (doseq [f follows] (reply-to-follow f))))
+
+(defn handle-user-stream
+  []
+  (let [stream (client/retrieve-queues mentions-stream)
+        user-events (:unknown stream)
+        mentions (:tweet stream)]
+    (reply-to-follows user-events)
+    (reply-to-mentions mentions)
+    ))
 
 
 (defn -main
@@ -268,17 +277,13 @@
       (client/start-twitter-stream number-stream)
       (client/start-twitter-stream who-stream)
 
-        (future (log/debug "STARTING MENTIONS STREAM")
-                       (do-every 60500 reply-to-mentions))
+        (future (log/debug "STARTING USER STREAM")
+                       (do-every 60500 handle-user-stream))
 
         (future (log/debug "STARTING NUMBERS STREAM")
                        (do-every 60250 reply-to-numbers))
 
         (future (log/debug "STARTING WHO STREAM")
                        (do-every 60000 respond-who))
-
-        (future (log/debug "STARTING FOLLOW STREAM")
-              (do-every 60750 reply-to-follows))
-
 
       ))
